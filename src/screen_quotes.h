@@ -3,7 +3,11 @@
 #include "config.h"
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <math.h>
+#include <string.h>
 
+// Cotações — um card por ativo, preço com easing ("rolando" até o valor novo,
+// efeito de painel de bolsa) e badge colorido com a variação percentual.
 class QuotesScreen : public Screen {
 public:
     const char* name() override { return "Cotacoes"; }
@@ -16,22 +20,98 @@ public:
     void onEnter(TFT_eSPI& tft) override {
         lastPoll_ = 0;
         drawn_ = false;
+        for (int i = 0; i < N_ROWS; i++) {
+            // Ao voltar pra aba, mostra direto o último valor conhecido
+            // (sem rolar do zero de novo); força o redesenho zerando o cache.
+            rows_[i].disp = rows_[i].target;
+            rows_[i].lastStr[0] = '\0';
+            rows_[i].pctDrawn = false;
+        }
 
         theme::beginLabelFont(tft);
-        drawRowLabel(tft, ROW_USD, "USD", DRACULA_GREEN);
-        drawRowLabel(tft, ROW_AUD, "AUD", DRACULA_CYAN);
-        drawRowLabel(tft, ROW_BTC, "BTC", DRACULA_ORANGE);
-        drawRowLabel(tft, ROW_SOL, "SOL", DRACULA_PURPLE);
+        for (int i = 0; i < N_ROWS; i++) {
+            int y = rowY(i);
+            theme::drawCard(tft, 8, y, 304, CARD_H);
+            theme::iconCoin(tft, 30, y + CARD_H / 2, 11, rows_[i].color);
+            tft.setTextDatum(ML_DATUM);
+            tft.setTextColor(DRACULA_COMMENT, DRACULA_CARD);
+            tft.drawString(rows_[i].ticker, 48, y + CARD_H / 2);
+        }
         theme::endLabelFont(tft);
     }
 
     void update(TFT_eSPI& tft) override {
         unsigned long now = millis();
-        if (now - lastPoll_ < QUOTES_POLL_MS && drawn_) return;
-        lastPoll_ = now;
+        if (now - lastPoll_ >= QUOTES_POLL_MS || !drawn_) {
+            lastPoll_ = now;
+            poll(tft);
+        }
+        // Easing dos preços a cada tick, independente do poll
+        for (int i = 0; i < N_ROWS; i++) animateRow(tft, i);
+    }
 
+private:
+    static const int N_ROWS = 4;
+    static const int CARD_H = 42;
+    static const int STATUS_CY = 231;
+
+    struct Row {
+        const char* ticker;
+        uint16_t color;
+        float target = 0, disp = 0, pct = 0;
+        char lastStr[16] = "";
+        bool hasData = false;
+        bool pctDrawn = false;
+        Row(const char* t, uint16_t c) : ticker(t), color(c) {}
+    };
+
+    // 4º card termina em y=216 — folga de 5px pro status (221..240)
+    int rowY(int i) { return 36 + i * 46; }
+
+    void animateRow(TFT_eSPI& tft, int i) {
+        Row& r = rows_[i];
+        if (!r.hasData) return;
+
+        r.disp += (r.target - r.disp) * 0.25f;
+        // Converge de vez quando chega perto (proporcional à escala do ativo)
+        if (fabsf(r.disp - r.target) < fmaxf(0.005f, r.target * 0.0001f)) {
+            r.disp = r.target;
+        }
+
+        char buf[16];
+        formatPrice(buf, sizeof(buf), r.disp);
+        if (strcmp(buf, r.lastStr) != 0) {
+            strncpy(r.lastStr, buf, sizeof(r.lastStr));
+            theme::drawValue(tft, 92, rowY(i) + CARD_H / 2 - 12, 128, 24,
+                             buf, 4, DRACULA_FG, DRACULA_CARD, ML_DATUM);
+        }
+        if (!r.pctDrawn) {
+            r.pctDrawn = true;
+            theme::drawPctBadge(tft, 298, rowY(i) + CARD_H / 2, r.pct, DRACULA_CARD);
+        }
+    }
+
+    void formatPrice(char* buf, size_t len, float brl) {
+        if (brl >= 1000.0f) {
+            snprintf(buf, len, "R$%.0f", brl);
+        } else {
+            snprintf(buf, len, "R$%.2f", brl);
+        }
+    }
+
+    void setRow(int i, float brl, float pct) {
+        Row& r = rows_[i];
+        r.target = brl;
+        if (fabsf(pct - r.pct) >= 0.005f || !r.hasData) {
+            r.pct = pct;
+            r.pctDrawn = false;  // badge só redesenha quando a variação muda
+        }
+        r.hasData = true;
+    }
+
+    void poll(TFT_eSPI& tft) {
         if (WiFi.status() != WL_CONNECTED) {
-            theme::drawStatusDot(tft, 310, ROW_STATUS, DRACULA_RED, "sem wifi");
+            theme::drawStatusDot(tft, 310, STATUS_CY, DRACULA_RED, "sem wifi");
             return;
         }
 
@@ -43,7 +123,7 @@ public:
 
         if (code != 200) {
             http.end();
-            theme::drawStatusDot(tft, 310, ROW_STATUS, DRACULA_ORANGE, "agente offline");
+            theme::drawStatusDot(tft, 310, STATUS_CY, DRACULA_ORANGE, "agente offline");
             return;
         }
 
@@ -51,49 +131,25 @@ public:
         DeserializationError err = deserializeJson(doc, http.getStream());
         http.end();
         if (err) {
-            theme::drawStatusDot(tft, 310, ROW_STATUS, DRACULA_ORANGE, "json invalido");
+            theme::drawStatusDot(tft, 310, STATUS_CY, DRACULA_ORANGE, "json invalido");
             return;
         }
 
-        drawRow(tft, ROW_USD, doc["USD"]["brl"] | 0.0f, doc["USD"]["change_pct"] | 0.0f);
-        drawRow(tft, ROW_AUD, doc["AUD"]["brl"] | 0.0f, doc["AUD"]["change_pct"] | 0.0f);
-        drawRow(tft, ROW_BTC, doc["BTC"]["brl"] | 0.0f, doc["BTC"]["change_pct"] | 0.0f);
-        drawRow(tft, ROW_SOL, doc["SOL"]["brl"] | 0.0f, doc["SOL"]["change_pct"] | 0.0f);
+        setRow(0, doc["USD"]["brl"] | 0.0f, doc["USD"]["change_pct"] | 0.0f);
+        setRow(1, doc["AUD"]["brl"] | 0.0f, doc["AUD"]["change_pct"] | 0.0f);
+        setRow(2, doc["BTC"]["brl"] | 0.0f, doc["BTC"]["change_pct"] | 0.0f);
+        setRow(3, doc["SOL"]["brl"] | 0.0f, doc["SOL"]["change_pct"] | 0.0f);
 
-        theme::drawStatusDot(tft, 310, ROW_STATUS, DRACULA_GREEN, "ok");
+        theme::drawStatusDot(tft, 310, STATUS_CY, DRACULA_GREEN, "ok");
         drawn_ = true;
     }
 
-private:
-    static const int ROW_USD = 74;
-    static const int ROW_AUD = 126;
-    static const int ROW_BTC = 178;
-    static const int ROW_SOL = 214;
-    static const int ROW_STATUS = 234;
-
-    void drawRowLabel(TFT_eSPI& tft, int y, const char* label, uint16_t color) {
-        theme::iconCoin(tft, 24, y, 11, color);
-        tft.setTextDatum(ML_DATUM);
-        tft.setTextColor(DRACULA_COMMENT, DRACULA_BG);
-        tft.drawString(label, 42, y, 2);
-    }
-
-    void drawRow(TFT_eSPI& tft, int y, float brl, float pct) {
-        char priceBuf[16];
-        if (brl >= 1000.0f) {
-            snprintf(priceBuf, sizeof(priceBuf), "R$%.0f", brl);
-        } else {
-            snprintf(priceBuf, sizeof(priceBuf), "R$%.2f", brl);
-        }
-        tft.setTextDatum(ML_DATUM);
-        tft.setTextColor(DRACULA_FG, DRACULA_BG);
-        tft.setTextPadding(140);
-        tft.drawString(priceBuf, 78, y, 4);
-        tft.setTextPadding(0);
-
-        theme::drawPctBadge(tft, 310, y, pct);
-    }
-
+    Row rows_[N_ROWS] = {
+        {"USD", DRACULA_GREEN},
+        {"AUD", DRACULA_CYAN},
+        {"BTC", DRACULA_ORANGE},
+        {"SOL", DRACULA_PURPLE},
+    };
     unsigned long lastPoll_ = 0;
     bool drawn_ = false;
 };

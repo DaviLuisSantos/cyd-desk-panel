@@ -1,6 +1,6 @@
 // CYD Desk Panel — ESP32-2432S028R
-// Painel auxiliar de mesa: relógio + stats do PC (MVP)
-// Navegação: toque nas bordas laterais da tela
+// Painel auxiliar de mesa: relógio + stats do PC + cotações
+// Navegação: tab bar touch no topo (+ auto-next configurável)
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -13,7 +13,10 @@
 #include "screens.h"
 #include "screen_clock.h"
 #include "screen_pcstats.h"
+#include "screen_procs.h"
+#include "screen_sysinfo.h"
 #include "screen_quotes.h"
+#include "screen_youtube.h"
 
 TFT_eSPI tft;
 
@@ -24,7 +27,10 @@ XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
 ScreenManager manager;
 ClockScreen screenClock;
 PcStatsScreen screenPc;
+ProcsScreen screenProcs;
+SysInfoScreen screenSys;
 QuotesScreen screenQuotes;
+YouTubeScreen screenYt;
 
 unsigned long lastTouchMs = 0;
 const unsigned long TOUCH_DEBOUNCE_MS = 300;
@@ -54,12 +60,15 @@ void connectWiFi() {
     }
 }
 
+const int BL_PWM_CH = 0;
+
 void setup() {
     Serial.begin(115200);
 
-    // Backlight
-    pinMode(TFT_BL, OUTPUT);
-    digitalWrite(TFT_BL, HIGH);
+    // Backlight via PWM (permite fade-in suave no boot em vez de ligar seco)
+    ledcSetup(BL_PWM_CH, 5000, 8);
+    ledcAttachPin(TFT_BL, BL_PWM_CH);
+    ledcWrite(BL_PWM_CH, 0);
 
     // Display em landscape, USB pra direita
     tft.init();
@@ -69,6 +78,12 @@ void setup() {
     // Se ficar pior (cores nítidas ao contrário do esperado), troque pra false.
     tft.invertDisplay(true);
     tft.fillScreen(DRACULA_BG);
+
+    // Fade-in do backlight com a tela já limpa no fundo do tema
+    for (int duty = 0; duty <= 255; duty += 5) {
+        ledcWrite(BL_PWM_CH, duty);
+        delay(4);
+    }
 
     // Touch no barramento próprio
     touchSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
@@ -83,7 +98,10 @@ void setup() {
     // Registra telas — pra adicionar uma nova, é só criar a classe e dar add()
     manager.add(&screenClock);
     manager.add(&screenPc);
+    manager.add(&screenProcs);
+    manager.add(&screenSys);
     manager.add(&screenQuotes);
+    manager.add(&screenYt);
     manager.begin(tft);
 }
 

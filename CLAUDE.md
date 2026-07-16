@@ -4,13 +4,18 @@ Orientações para agentes trabalhando neste repositório. Respostas e comentár
 
 ## O que é
 
-Firmware para o **ESP32-2432S028R (Cheap Yellow Display / CYD)** — um painel auxiliar de mesa. Três telas navegáveis por toque:
+Firmware para o **ESP32-2432S028R (Cheap Yellow Display / CYD)** — um painel auxiliar de mesa. Seis telas navegáveis por toque:
 
 - **Relógio** (`screen_clock.h`) — hora/data via NTP. Herança do MVP inicial, não é foco (o Davi já tem outro dispositivo pra relógio/clima).
-- **PC Stats** (`screen_pcstats.h`) — CPU, RAM, disco e rede do PC. É o coração do painel.
+- **PC Stats** (`screen_pcstats.h`) — anéis de CPU/RAM, sparkline de histórico da CPU, disco e rede. É o coração do painel.
+- **Processos** (`screen_procs.h`) — top 4 processos por CPU (agregados por nome no agente).
+- **Rede** (`screen_sysinfo.h`) — ping, uptime, IP público e sparkline de download.
 - **Cotações** (`screen_quotes.h`) — USD, AUD, BTC, SOL em BRL.
+- **YouTube** (`screen_youtube.h`) — inscritos/views/vídeos dos canais configurados no agente (requer API key).
 
-PC Stats e Cotações consultam um agente HTTP (`agent/pc_stats_agent.py`) rodando na máquina local (`/stats` e `/quotes`).
+Todas menos o Relógio consultam um agente HTTP (`agent/pc_stats_agent.py`) rodando na máquina local (`/stats`, `/quotes`, `/procs`, `/sysinfo`, `/youtube`).
+
+**GPU não interessa** — o Davi pediu explicitamente pra não incluir métricas de GPU no painel.
 
 **Visual: tema Dracula, navegação por abas.** Tab bar fixa no topo (34px) com ícones vetoriais (sem bitmap/filesystem); tocar numa aba troca de tela direto — sem mais swipe nas bordas. Ver seção "Tema visual" abaixo.
 
@@ -51,27 +56,31 @@ Direção pretendida (múltiplas telas navegáveis por toque):
 
 ## Tema visual
 
-- **Paleta:** Dracula (`DRACULA_BG`, `DRACULA_FG`, `DRACULA_CURRENT`, `DRACULA_CYAN/GREEN/ORANGE/PINK/PURPLE/RED/YELLOW`), calculada em RGB565 e definida em `theme.h`. Nunca usar as constantes `TFT_*` do TFT_eSPI (TFT_BLACK, TFT_WHITE etc.) — sempre `DRACULA_*`.
+- **Paleta:** Dracula (`DRACULA_BG`, `DRACULA_FG`, `DRACULA_CURRENT`, `DRACULA_CARD`, `DRACULA_CYAN/GREEN/ORANGE/PINK/PURPLE/RED/YELLOW`), calculada em RGB565 e definida em `theme.h`. Nunca usar as constantes `TFT_*` do TFT_eSPI (TFT_BLACK, TFT_WHITE etc.) — sempre `DRACULA_*`. `DRACULA_CARD` (#313442, entre BG e CURRENT) é o fundo dos cards de conteúdo (`theme::drawCard`).
+- **Desenho sem flicker via sprite (`theme::Canvas`):** todo elemento dinâmico (texto que atualiza, barra, anel, badge, sparkline) é desenhado num `TFT_eSprite` compartilhado e enviado com um único `pushSprite` — atualização atômica, zero piscada. O padrão é create/push/delete por uso (os tamanhos se repetem a cada ciclo, o heap estabiliza; nada de sprite gigante permanente disputando RAM com o WiFi). `theme::drawValue(tft, x, y, w, h, texto, fonte, cor, bg, datum)` substitui o padrão antigo de `setTextPadding` + `drawString` direto para valores dinâmicos — a região inteira (w×h) é redesenhada no sprite, então o valor antigo some junto. **Sempre passar o `bg` real de onde o widget está** (`DRACULA_BG` ou `DRACULA_CARD`). **Pegadinha de altura (bug já corrigido uma vez):** se `h` for menor que a altura da fonte (font 4 = 26px), texto centralizado estoura o topo do sprite e os dígitos saem decapitados — por isso o `drawValue` ancora o texto pelo topo quando `fontHeight > h` (cortar por baixo é invisível pra números, é área de descender). Mesmo assim, prefira `h` ≥ altura da fonte quando o layout permitir (font 4 → h=22-26).
 - **Navegação por abas:** `ScreenManager` desenha uma tab bar de `TAB_BAR_H`=34px no topo com o ícone de cada `Screen` (via `drawIcon`). A aba ativa vira da cor do conteúdo (`DRACULA_BG`, efeito "aba conectada") com uma barrinha de destaque (`accentColor()` daquela tela) por baixo; as inativas ficam com ícone em `DRACULA_COMMENT` sobre fundo `DRACULA_CURRENT`. Tocar em qualquer ponto com `y < TAB_BAR_H` troca de aba direto (calcula o índice pela posição x); toque abaixo disso vai pro `onTouch` da tela ativa. Não tem mais swipe nas bordas — cada tela é acessada diretamente pela aba.
 - **Auto-next:** o `ScreenManager` troca de aba sozinho a cada `AUTO_NEXT_MS` (`config.h`, padrão 10s) sem interação — dá pra deixar o painel "passando" as telas sozinho. Qualquer toque (numa aba ou no conteúdo) reinicia o timer via `lastActivityMs_`, então não interrompe quem tá mexendo. `AUTO_NEXT_MS = 0` desativa.
-- **Ícones são 100% vetoriais** (`theme::iconClock/iconCpu/iconRam/iconDisk/iconNet/iconCoin/iconArrowUp/iconArrowDown`), desenhados com primitivas do TFT_eSPI (`drawCircle`, `fillTriangle`, etc.) — de propósito, pra não precisar de SPIFFS/LittleFS nem bitmaps embutidos no firmware. Recebem `cx, cy, size, color` — `size=8` é o padrão usado na tab bar; nas linhas de conteúdo usa-se algo maior (11-12) pra ganhar presença visual sem depender de bitmap. Se for adicionar um ícone novo, seguir esse padrão (função livre em `theme.h`, parametrizada por tamanho).
-- **Distribuição vertical do conteúdo (linhas de PC Stats/Cotações):** as linhas usam a altura toda abaixo da tab bar, não só o topo — primeira linha com respiro generoso da tab bar (~40px), linhas espaçadas ~52-56px, indicador de status numa faixa final compacta perto do rodapé. Evitar deixar as linhas grudadas na tab bar com um vazio grande embaixo (problema já corrigido uma vez — layout muito apertado em cima e vazio embaixo é o erro mais fácil de reintroduzir ao adicionar uma linha nova).
-- **Widgets reutilizáveis em `theme.h`:** `drawBar` (barra de progresso com cantos arredondados sobre trilho `DRACULA_CURRENT`), `drawPctBadge` (pill colorido verde/vermelho pra variação percentual, usado nas cotações), `drawStatusDot` (indicador de status discreto — dot colorido + label pequeno — substituiu os banners de texto centralizados tipo "agente offline"). Todos usam as variantes *smooth* do TFT_eSPI (`fillSmoothRoundRect`, `fillSmoothCircle`) — bordas com anti-aliasing de verdade, não só `fillRoundRect` cru. Essas funções recebem um `bg_color` explícito (a cor que já está por trás da forma) pra fazer o blend da borda corretamente; sempre passar a cor de fundo real do local onde a forma é desenhada, não deixar no default.
+- **Ícones são 100% vetoriais** (`theme::iconClock/iconCpu/iconRam/iconDisk/iconNet/iconCoin/iconList/iconPlay/iconArrowUp/iconArrowDown`), desenhados com primitivas do TFT_eSPI (`drawCircle`, `fillTriangle`, etc.) — de propósito, pra não precisar de SPIFFS/LittleFS nem bitmaps embutidos no firmware. Recebem `cx, cy, size, color` — `size=8` é o padrão usado na tab bar; nas linhas de conteúdo usa-se algo maior (11-12) pra ganhar presença visual sem depender de bitmap. Se for adicionar um ícone novo, seguir esse padrão (função livre em `theme.h`, parametrizada por tamanho).
+- **Distribuição vertical do conteúdo:** o conteúdo usa a altura toda abaixo da tab bar, não só o topo — evitar layout apertado em cima com vazio embaixo (erro já corrigido uma vez) e **deixar folga real (3px+) entre blocos vizinhos** — bloco encostando em bloco (card terminando na mesma linha y em que a região de texto seguinte começa) parece sobreposição (erro também já corrigido uma vez, no rodapé de rede do PC Stats). PC Stats: anéis CPU/RAM (centro y=90) → sparkline (y=136) → card do disco (y=158, h=36) → rodapé rede (centro y=208) + status (y=231). Cotações: 4 cards de 42px a cada 46px a partir de y=36, status em y=231.
+- **Widgets reutilizáveis em `theme.h`:** `drawBar` (barra de progresso arredondada sobre trilho `DRACULA_CURRENT`), `drawRingGauge` (anel/gauge com `drawSmoothArc`, arco de 30° a 330° com abertura embaixo, valor no centro — usado pra CPU/RAM), `drawSparkline` (mini-gráfico de linha do histórico, valores 0-100 em ordem cronológica), `drawCard` (fundo de card `DRACULA_CARD` arredondado — estático, desenhado no `onEnter`), `drawPctBadge` (pill verde/vermelho pra variação percentual), `drawStatusDot` (dot colorido + label pequeno pra status de rede/agente). Todos os dinâmicos desenham via `theme::Canvas` (sprite) e recebem um `bg` explícito (a cor que já está por trás) pro blend anti-aliased das bordas — sempre passar a cor de fundo real do local (BG ou CARD), não deixar no default.
 - **Smooth font (anti-aliased) nos labels estáticos:** `src/NotoSansBold15.h` é uma fonte suavizada (não é bitmap 1-bit) embutida como array em flash (sem precisar de SPIFFS/LittleFS — segue a mesma filosofia dos ícones vetoriais). Usada via `theme::beginLabelFont(tft)` / `theme::endLabelFont(tft)`, que fazem `tft.loadFont(...)`/`tft.unloadFont()`. **Importante:** enquanto uma smooth font está carregada, ela sobrepõe QUALQUER número de fonte clássica passado a `drawString` (é uma particularidade documentada do TFT_eSPI) — por isso só é usada ao redor de texto estático desenhado uma vez (labels em `onEnter`, data do relógio), nunca em volta de valores que atualizam com frequência (percentual das barras, preço, hora), que continuam nas fontes clássicas rápidas (2/4/6/7/8) com o padrão de `setTextPadding` de sempre. Se for redesenhar algo com smooth font no MESMO lugar depois (não é o caso hoje), lembrar do 3º parâmetro de `setTextColor(fg, bg, true)` — sem ele o fundo não é preenchido e o texto antigo não é apagado.
 - **Animações leves, todas via `millis()` sem lib de animação:**
-  - Relógio: dois-pontos piscando a cada 500ms (troca `:` por espaço no buffer, redesenha só quando o estado de piscar muda) + barrinha de progresso dos segundos dentro do minuto.
-  - PC Stats: barras de CPU/RAM/disco fazem *easing* suave até o valor-alvo a cada tick do `loop()` (~20ms, fator 0.3 por tick), redesenhando só quando o percentual inteiro exibido muda — dá uma sensação de movimento sem gastar SPI à toa. O polling HTTP em si continua no intervalo de `AGENT_POLL_MS`; a animação roda independente disso.
+  - Relógio: dois-pontos piscando a cada 500ms (troca `:` por espaço no buffer, redesenha via sprite só quando o estado de piscar muda) + barrinha de progresso dos segundos dentro do minuto.
+  - PC Stats: anéis de CPU/RAM e barra do disco fazem *easing* suave até o valor-alvo a cada tick do `loop()` (~20ms, fator 0.3 por tick), redesenhando só quando o percentual inteiro exibido muda. O polling HTTP em si continua no intervalo de `AGENT_POLL_MS`; a animação roda independente disso. O sparkline guarda os últimos 56 polls de CPU (~2 min) em RAM e redesenha a cada poll.
+  - Cotações: preços "rolam" com easing (fator 0.25 por tick) até o valor novo, redesenhando só quando a string formatada muda; o badge de variação só redesenha quando o percentual muda. Ao reentrar na aba, `disp` é igualado ao `target` pra não rolar do zero de novo.
+  - Transição de aba: o `ScreenManager` faz um *wipe* — uma linha vertical na cor de destaque da tela nova varre a área de conteúdo (esquerda→direita indo pra frente/dando a volta, direita→esquerda voltando), apagando a tela antiga atrás de si (~100ms, bloqueante via `delay(3)` por fatia).
+  - Boot: fade-in do backlight via PWM (`ledcSetup`/`ledcWrite`, canal 0 em `main.cpp`) — a tela acende suave já no fundo do tema em vez de ligar seco.
 - Cada tela expõe `accentColor()` (cor de identidade daquela aba — Relógio=CYAN, PC Stats=GREEN, Cotações=ORANGE) usada na tab bar e em detalhes do conteúdo (ex.: barra de segundos do relógio usa CYAN).
 
 ## Padrão de desenho de tela (importante)
 
 Displays SPI são lentos — **nunca redesenhar a tela inteira em `update()`**. O padrão:
 
-- `onEnter`: desenha o layout estático (títulos, labels) uma vez.
-- `update`: atualiza só o que mudou, guardando o último valor em membro (`lastMinute_`, `lastDay_`, `drawn_`, etc.) e redesenhando só na mudança.
-- Para apagar o valor antigo sem limpar a tela, usar `setTextPadding(largura)` antes do `drawString` e `setTextPadding(0)` depois.
+- `onEnter`: desenha o layout estático (cards, ícones, labels) uma vez, direto na tela.
+- `update`: atualiza só o que mudou, guardando o último valor em membro (`lastMinute_`, `lastDrawnCpu_`, `drawn_`, etc.) e redesenhando só na mudança.
+- Valores dinâmicos são redesenhados via sprite (`theme::drawValue` e os widgets de `theme.h`) — push atômico apaga o valor antigo junto, sem flicker. O padrão antigo de `setTextPadding` só sobrevive em texto estático redesenhado raramente (data do relógio).
 
-Ver `screen_clock.h` (redesenha hora só quando o minuto muda) e `screen_pcstats.h`/`screen_quotes.h` (poll a cada `AGENT_POLL_MS`/`QUOTES_POLL_MS`, com `drawn_` pra forçar o primeiro desenho e status na base da tela pra erro de rede/agente).
+Ver `screen_clock.h` (redesenha hora só quando o minuto muda/pisca) e `screen_pcstats.h`/`screen_quotes.h` (poll a cada `AGENT_POLL_MS`/`QUOTES_POLL_MS`, com `drawn_` pra forçar o primeiro desenho e status na base da tela pra erro de rede/agente).
 
 ## Adicionar uma tela nova
 
@@ -81,10 +90,13 @@ Ver `screen_clock.h` (redesenha hora só quando o minuto muda) e `screen_pcstats
 
 ## Agente do PC
 
-`agent/pc_stats_agent.py` — servidor HTTP (stdlib + `psutil`) na porta 8377, dois endpoints:
+`agent/pc_stats_agent.py` — servidor HTTP (stdlib + `psutil`) na porta 8377, cinco endpoints (cada um alimentado por uma thread de background própria; o handler HTTP só lê cache):
 
 - `GET /stats` — CPU, RAM, disco (uso % + MB/s leitura/escrita) e rede (MB/s down/up). Rede e disco são medidos por delta em thread de background (`_io_monitor`, a cada `IO_INTERVAL`=1s).
 - `GET /quotes` — cotações USD/AUD/BTC/SOL em BRL. Buscadas por thread de background (`_quotes_monitor`, a cada `QUOTES_INTERVAL`=60s) via AwesomeAPI (fiat) e CoinGecko (cripto), cacheadas em memória — o handler HTTP nunca bate na API externa por request. Se o fetch falhar, mantém o último valor conhecido e loga o erro (não derruba a thread).
+- `GET /procs` — top 4 processos por CPU, agregados por nome (todos os `chrome.exe` viram uma linha), com RAM somada em MB. `_procs_monitor` a cada `PROCS_INTERVAL`=3s; CPU normalizada pelo nº de núcleos. Mesma pegadinha do `cpu_percent`: por-processo ele também mede desde a última chamada naquele objeto `Process` — o `process_iter()` cacheia as instâncias, então funciona numa thread única.
+- `GET /sysinfo` — `ping_ms` (TCP connect na porta 53 do 8.8.8.8 — ICMP puro exigiria admin no Windows), `public_ip` (api.ipify.org, a cada 10min), `uptime_s` e as taxas de rede atuais. `_sys_monitor` a cada `SYS_INTERVAL`=5s.
+- `GET /youtube` — título/inscritos/views/vídeos dos canais em `YOUTUBE_CHANNEL_IDS` via YouTube Data API v3 (`_youtube_monitor`, a cada `YT_INTERVAL`=30min — 1 unidade de quota por fetch, folgadíssimo). **Requer `YOUTUBE_API_KEY`** (criar em console.cloud.google.com com a YouTube Data API v3 habilitada e colar na constante). Sem chave, responde `{"configured": false}` e a tela mostra o aviso. O canal do Davi (`UCkm45JSC0beQPEpYYfX3XKA`) já está pré-configurado na lista.
 
 Testar no navegador (`http://IP:8377/stats` e `/quotes`) antes de suspeitar do ESP32. Porta 8377 precisa estar liberada no firewall (rede privada). Sem novas dependências pip — `urllib` é da stdlib.
 
@@ -92,7 +104,7 @@ Testar no navegador (`http://IP:8377/stats` e `/quotes`) antes de suspeitar do E
 
 **Nota de dev (Windows + Git Bash):** rodar `python pc_stats_agent.py &` no Git Bash pode deixar processos zumbis presos na porta 8377 (o `HTTPServer`/`ThreadingHTTPServer` do Python tem `allow_reuse_address=True` por padrão, então o Windows deixa múltiplos processos "escutarem" a mesma porta sem erro, e as respostas saem de qualquer um deles). Se o `/stats` parecer não refletir mudanças no código, cheque `Get-CimInstance Win32_Process -Filter "Name='python.exe'"` e mate processos `pc_stats_agent.py` duplicados antes de reiniciar.
 
-**Scripts de conveniência:** `agent/start_agent.bat` / `stop_agent.bat` / `restart_agent.bat` (duplo-clique no Windows) automatizam exatamente essa checagem/limpeza — `start` não duplica se já tem algo na porta 8377, `stop` mata todo processo cujo command line contenha `pc_stats_agent.py` (não só um PID, por causa da questão dos zumbis acima). O agente é um processo manual, não sobrevive a reboot — não tem serviço/agendador configurado por padrão.
+**Scripts de conveniência:** `agent/start_agent.bat` / `stop_agent.bat` / `restart_agent.bat` (duplo-clique no Windows) automatizam exatamente essa checagem/limpeza — `start` não duplica se já tem algo na porta 8377, `stop` mata todo processo cujo command line contenha `pc_stats_agent.py` (não só um PID, por causa da questão dos zumbis acima). O agente é um processo manual, não sobrevive a reboot — não tem serviço/agendador configurado por padrão. **Os `.bat` terminam com `pause`** — rodá-los de uma sessão não-interativa (agente de IA, CI) trava no final; nesse caso, iniciar o agente direto com `Start-Process python .../pc_stats_agent.py` redirecionando stdout/stderr pra log.
 
 **Pegadinha de teste (Git Bash + `cmd.exe`):** ao testar esses `.bat` via Git Bash, `cmd.exe /c arquivo.bat` falha silenciosamente — o MSYS converte `/c` num path estilo Windows antes de repassar. Usar `cmd.exe //c arquivo.bat` (barra dupla) pra escapar, mesmo truque já usado com `taskkill //F //PID`. Isso é só uma pegadinha do ambiente de teste via Git Bash — não afeta o usuário final, que dá duplo-clique no `.bat` direto no Explorer.
 

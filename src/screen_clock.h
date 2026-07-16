@@ -25,17 +25,16 @@ public:
 
         bool blinkOn = (millis() / 500) % 2 == 0;
 
-        // Redesenha a hora quando o minuto muda ou o ":" pisca
+        // Redesenha a hora quando o minuto muda ou o ":" pisca (via sprite,
+        // push atômico — sem o flicker do redesenho direto da fonte gigante)
         if (t.tm_min != lastMinute_ || (int)blinkOn != lastBlinkOn_) {
             lastMinute_ = t.tm_min;
             lastBlinkOn_ = blinkOn;
             char buf[6];
             snprintf(buf, sizeof(buf), "%02d%c%02d", t.tm_hour, blinkOn ? ':' : ' ', t.tm_min);
-            tft.setTextDatum(MC_DATUM);
-            tft.setTextColor(DRACULA_FG, DRACULA_BG);
-            tft.setTextPadding(220);
-            tft.drawString(buf, 160, 100, 8);
-            tft.setTextPadding(0);
+            // 280px de largura: "88:88" na font 8 tem ~250px — com 220 o
+            // último dígito era clipado pelo sprite
+            theme::drawValue(tft, 20, 60, 280, 80, buf, 8, DRACULA_FG, DRACULA_BG, MC_DATUM);
         }
 
         // Data só quando o dia muda

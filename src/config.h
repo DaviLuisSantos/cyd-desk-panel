@@ -4,12 +4,18 @@
 #define WIFI_SSID     "virus"
 #define WIFI_PASSWORD "Davi@2025"
 
+//#define WIFI_SSID     "TRABALHOPC 0661"
+//#define WIFI_PASSWORD "713[34Ww"
+
 // ===== Agente de stats do PC =====
 // IP da sua máquina na rede local + porta do agente Python
-#define AGENT_HOST "192.168.1.11"
+#define AGENT_HOST "192.168.0.192"
 #define AGENT_PORT 8377
 #define AGENT_POLL_MS 2000     // intervalo de consulta a /stats
 #define QUOTES_POLL_MS 30000   // intervalo de consulta a /quotes (o agente só atualiza a cada 60s)
+#define PROCS_POLL_MS 3000     // intervalo de consulta a /procs
+#define SYS_POLL_MS 5000       // intervalo de consulta a /sysinfo
+#define YT_POLL_MS 300000      // intervalo de consulta a /youtube (o agente só atualiza a cada 30min)
 
 // ===== Navegação =====
 #define AUTO_NEXT_MS 10000  // troca de aba automática (0 = desativa). Reinicia a cada toque.

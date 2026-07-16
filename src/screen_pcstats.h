@@ -5,8 +5,8 @@
 #include <ArduinoJson.h>
 #include <math.h>
 
-typedef void (*IconFn)(TFT_eSPI&, int, int, int, uint16_t);
-
+// PC Stats — layout misto: anéis (gauges) pra CPU e RAM, sparkline com o
+// histórico da CPU, card com barra pro disco e rodapé com rede + status.
 class PcStatsScreen : public Screen {
 public:
     const char* name() override { return "PC"; }
@@ -24,11 +24,23 @@ public:
         lastDrawnCpu_ = lastDrawnRam_ = lastDrawnDisk_ = -1;
         netDown_ = netUp_ = -1;
 
+        // Card do disco + labels estáticos (uma vez só)
+        theme::drawCard(tft, 12, CARD_Y, 296, CARD_H);
+        theme::iconDisk(tft, 32, CARD_CY, 10, DRACULA_COMMENT);
+        theme::iconArrowDown(tft, 24, NET_CY, 5, DRACULA_CYAN);
+        theme::iconArrowUp(tft, 178, NET_CY, 5, DRACULA_PURPLE);
+
         theme::beginLabelFont(tft);
-        drawRowLabel(tft, ROW_CPU, theme::iconCpu, "CPU");
-        drawRowLabel(tft, ROW_RAM, theme::iconRam, "RAM");
-        drawRowLabel(tft, ROW_DISK, theme::iconDisk, "DISCO");
+        tft.setTextDatum(ML_DATUM);
+        tft.setTextColor(DRACULA_COMMENT, DRACULA_CARD);
+        tft.drawString("DISCO", 46, CARD_CY);
+        tft.setTextColor(DRACULA_COMMENT, DRACULA_BG);
+        tft.drawString("Mb/s", 114, NET_CY);
+        tft.drawString("Mb/s", 268, NET_CY);
         theme::endLabelFont(tft);
+
+        theme::drawSparkline(tft, SPARK_X, SPARK_Y, SPARK_W, SPARK_H,
+                             hist_, histCount_, DRACULA_GREEN);
     }
 
     void update(TFT_eSPI& tft) override {
@@ -37,54 +49,74 @@ public:
             lastPoll_ = now;
             poll(tft);
         }
-        // Anima as barras a cada tick, independente do poll (efeito de easing)
-        animate(tft, ROW_CPU, dispCpu_, targetCpu_, lastDrawnCpu_);
-        animate(tft, ROW_RAM, dispRam_, targetRam_, lastDrawnRam_);
-        animate(tft, ROW_DISK, dispDisk_, targetDisk_, lastDrawnDisk_);
+        // Anima anéis e barra a cada tick, independente do poll (easing)
+        animateRing(tft, RING_CPU_CX, dispCpu_, targetCpu_, lastDrawnCpu_, DRACULA_GREEN, "CPU");
+        animateRing(tft, RING_RAM_CX, dispRam_, targetRam_, lastDrawnRam_, DRACULA_CYAN, "RAM");
+        animateDiskBar(tft);
     }
 
 private:
-    static const int ROW_CPU = 76;
-    static const int ROW_RAM = 130;
-    static const int ROW_DISK = 184;
-    static const int ROW_NET = 210;
-    static const int ROW_STATUS = 234;
+    // Anéis CPU/RAM (topo do anel em y=52)
+    static const int RING_CY = 90;
+    static const int RING_CPU_CX = 88;
+    static const int RING_RAM_CX = 232;
+    static const int RING_R = 36;
+    static const int RING_TH = 9;
+    // Sparkline do histórico de CPU (~2 min a cada 2s de poll)
+    static const int SPARK_X = 20, SPARK_Y = 136, SPARK_W = 280, SPARK_H = 16;
+    static const int SPARK_N = 56;
+    // Card do disco (158..194)
+    static const int CARD_Y = 158;
+    static const int CARD_H = 36;
+    static const int CARD_CY = CARD_Y + CARD_H / 2;
+    // Rodapé: rede (região 198..218, com folga do card) + status (221..240)
+    static const int NET_CY = 208;
+    static const int STATUS_CY = 231;
 
-    void drawRowLabel(TFT_eSPI& tft, int y, IconFn icon, const char* label) {
-        icon(tft, 24, y, 12, DRACULA_COMMENT);
-        tft.setTextDatum(ML_DATUM);
-        tft.setTextColor(DRACULA_COMMENT, DRACULA_BG);
-        tft.drawString(label, 42, y, 2);
-    }
-
-    void animate(TFT_eSPI& tft, int y, float& displayed, float target, int& lastDrawn) {
-        displayed += (target - displayed) * 0.3f;
-        if (fabsf(displayed - target) < 0.1f) displayed = target;
-
-        int intPct = (int)(displayed + 0.5f);
-        if (intPct == lastDrawn) return;
-        lastDrawn = intPct;
-
-        theme::drawBar(tft, 96, y - 11, 148, 22, displayed, barColor(displayed));
-
-        char buf[6];
-        snprintf(buf, sizeof(buf), "%3d%%", intPct);
-        tft.setTextDatum(ML_DATUM);
-        tft.setTextColor(DRACULA_FG, DRACULA_BG);
-        tft.setTextPadding(52);
-        tft.drawString(buf, 254, y, 4);
-        tft.setTextPadding(0);
-    }
-
-    uint16_t barColor(float pct) {
+    uint16_t loadColor(float pct, uint16_t base) {
         if (pct >= 90) return DRACULA_RED;
         if (pct >= 70) return DRACULA_ORANGE;
-        return DRACULA_GREEN;
+        return base;
+    }
+
+    void animateRing(TFT_eSPI& tft, int cx, float& disp, float target,
+                     int& lastDrawn, uint16_t base, const char* label) {
+        disp += (target - disp) * 0.3f;
+        if (fabsf(disp - target) < 0.1f) disp = target;
+        int ip = (int)(disp + 0.5f);
+        if (ip == lastDrawn) return;
+        lastDrawn = ip;
+        theme::drawRingGauge(tft, cx, RING_CY, RING_R, RING_TH, disp,
+                             loadColor(disp, base), label);
+    }
+
+    void animateDiskBar(TFT_eSPI& tft) {
+        dispDisk_ += (targetDisk_ - dispDisk_) * 0.3f;
+        if (fabsf(dispDisk_ - targetDisk_) < 0.1f) dispDisk_ = targetDisk_;
+        int ip = (int)(dispDisk_ + 0.5f);
+        if (ip == lastDrawnDisk_) return;
+        lastDrawnDisk_ = ip;
+
+        theme::drawBar(tft, 108, CARD_CY - 5, 134, 10, dispDisk_,
+                       loadColor(dispDisk_, DRACULA_GREEN), DRACULA_CARD);
+        char buf[6];
+        snprintf(buf, sizeof(buf), "%d%%", ip);
+        theme::drawValue(tft, 250, CARD_CY - 11, 52, 22, buf, 4,
+                         DRACULA_FG, DRACULA_CARD, MR_DATUM);
+    }
+
+    void pushHistory(float pct) {
+        if (histCount_ < SPARK_N) {
+            hist_[histCount_++] = pct;
+        } else {
+            memmove(hist_, hist_ + 1, (SPARK_N - 1) * sizeof(float));
+            hist_[SPARK_N - 1] = pct;
+        }
     }
 
     void poll(TFT_eSPI& tft) {
         if (WiFi.status() != WL_CONNECTED) {
-            theme::drawStatusDot(tft, 310, ROW_STATUS, DRACULA_RED, "sem wifi");
+            theme::drawStatusDot(tft, 310, STATUS_CY, DRACULA_RED, "sem wifi");
             return;
         }
 
@@ -96,7 +128,7 @@ private:
 
         if (code != 200) {
             http.end();
-            theme::drawStatusDot(tft, 310, ROW_STATUS, DRACULA_ORANGE, "agente offline");
+            theme::drawStatusDot(tft, 310, STATUS_CY, DRACULA_ORANGE, "agente offline");
             return;
         }
 
@@ -104,7 +136,7 @@ private:
         DeserializationError err = deserializeJson(doc, http.getStream());
         http.end();
         if (err) {
-            theme::drawStatusDot(tft, 310, ROW_STATUS, DRACULA_ORANGE, "json invalido");
+            theme::drawStatusDot(tft, 310, STATUS_CY, DRACULA_ORANGE, "json invalido");
             return;
         }
 
@@ -115,7 +147,11 @@ private:
         float up = doc["net_up_mbps"]   | 0.0f;
         drawNet(tft, dl, up);
 
-        theme::drawStatusDot(tft, 310, ROW_STATUS, DRACULA_GREEN, "ok");
+        pushHistory(targetCpu_);
+        theme::drawSparkline(tft, SPARK_X, SPARK_Y, SPARK_W, SPARK_H,
+                             hist_, histCount_, DRACULA_GREEN);
+
+        theme::drawStatusDot(tft, 310, STATUS_CY, DRACULA_GREEN, "ok");
         drawn_ = true;
     }
 
@@ -124,23 +160,13 @@ private:
         netDown_ = dl;
         netUp_ = up;
 
-        theme::iconArrowDown(tft, 30, ROW_NET, 5, DRACULA_CYAN);
-        char bufDl[16];
-        snprintf(bufDl, sizeof(bufDl), "%.1f Mb/s", dl);
-        tft.setTextDatum(ML_DATUM);
-        tft.setTextColor(DRACULA_FG, DRACULA_BG);
-        tft.setTextPadding(90);
-        tft.drawString(bufDl, 46, ROW_NET, 4);
-        tft.setTextPadding(0);
-
-        theme::iconArrowUp(tft, 190, ROW_NET, 5, DRACULA_PURPLE);
-        char bufUp[16];
-        snprintf(bufUp, sizeof(bufUp), "%.1f Mb/s", up);
-        tft.setTextDatum(ML_DATUM);
-        tft.setTextColor(DRACULA_FG, DRACULA_BG);
-        tft.setTextPadding(90);
-        tft.drawString(bufUp, 206, ROW_NET, 4);
-        tft.setTextPadding(0);
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%.1f", dl);
+        theme::drawValue(tft, 36, NET_CY - 12, 74, 24, buf, 4,
+                         DRACULA_FG, DRACULA_BG, ML_DATUM);
+        snprintf(buf, sizeof(buf), "%.1f", up);
+        theme::drawValue(tft, 190, NET_CY - 12, 74, 24, buf, 4,
+                         DRACULA_FG, DRACULA_BG, ML_DATUM);
     }
 
     unsigned long lastPoll_ = 0;
@@ -149,4 +175,6 @@ private:
     float targetCpu_ = 0, targetRam_ = 0, targetDisk_ = 0;
     int lastDrawnCpu_ = -1, lastDrawnRam_ = -1, lastDrawnDisk_ = -1;
     float netDown_ = -1, netUp_ = -1;
+    float hist_[SPARK_N];
+    int histCount_ = 0;
 };

@@ -61,11 +61,35 @@ private:
     void next() { if (count_) enter((current_ + 1) % count_); }
 
     void enter(int idx) {
+        int prev = current_;
         current_ = idx;
         lastActivityMs_ = millis();
-        tft_->fillRect(0, TAB_BAR_H, SCREEN_W, SCREEN_H - TAB_BAR_H, DRACULA_BG);
-        screens_[idx]->onEnter(*tft_);
+        if (prev >= 0 && prev != idx) {
+            // Ir pra uma aba à direita (ou dar a volta) varre pra frente;
+            // voltar pra uma aba à esquerda varre pra trás.
+            bool forward = (idx == (prev + 1) % count_) || idx > prev;
+            wipe(screens_[idx]->accentColor(), forward);
+        } else {
+            tft_->fillRect(0, TAB_BAR_H, SCREEN_W, SCREEN_H - TAB_BAR_H, DRACULA_BG);
+        }
         drawTabBar();
+        screens_[idx]->onEnter(*tft_);
+    }
+
+    // Transição de aba: uma linha vertical na cor de destaque da tela nova
+    // varre a área de conteúdo, apagando a tela antiga atrás de si.
+    void wipe(uint16_t accent, bool forward) {
+        const int stepW = 10;
+        const int contentH = SCREEN_H - TAB_BAR_H;
+        for (int x = 0; x < SCREEN_W; x += stepW) {
+            int px = forward ? x : SCREEN_W - stepW - x;
+            tft_->fillRect(px, TAB_BAR_H, stepW, contentH, DRACULA_BG);
+            int lx = forward ? px + stepW : px - 1;
+            if (lx >= 0 && lx < SCREEN_W) {
+                tft_->drawFastVLine(lx, TAB_BAR_H, contentH, accent);
+            }
+            delay(3);
+        }
     }
 
     void drawTabBar() {
